@@ -1,0 +1,4 @@
+    Checking xtask v0.1.0 (/home/graven/dev/rust/grave/xtask)
+error: could not compile `xtask` (bin "xtask") due to 43 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `xtask` (bin "xtask" test) due to 44 previous errors
