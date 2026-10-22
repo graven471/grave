@@ -1,3 +1,4 @@
+#![feature(abi_x86_interrupt)]
 #![no_std]
 #![no_main]
 
@@ -8,12 +9,13 @@ use core::fmt::Write;
 use crate::{
     boot::BootInfo,
     drivers::serial::{Serial, SerialWriter, uart16550::Uart},
-    x86_64::gdt::load_gdt,
+    x86_64::{gdt::load_gdt, idt::load_idt},
 };
 
 pub mod boot;
 pub mod drivers;
 pub mod memory;
+pub mod sync;
 pub mod x86_64;
 
 unsafe extern "C" {
@@ -45,8 +47,10 @@ pub extern "C" fn kernel_main() -> ! {
     }
 
     load_gdt();
-
     writeln!(writer, "GDT loaded successfully").unwrap();
+
+    load_idt();
+    writeln!(writer, "IDT loaded successfully").unwrap();
 
     let boot_info = BootInfo::new();
 

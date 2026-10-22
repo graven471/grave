@@ -76,14 +76,6 @@ pub fn load_gdt() {
             in(reg) &gdtr as *const Gdtr,
             options(readonly, nostack, preserves_flags)
         );
-
-        // load kernel data into segment registers
-        // DS, ES, SS is 0 in 64-bit mode but we still need to load them with a valid selector
-        // CS is code segment CPL lives here
-        // for DS, ES, SS we will set 0x10 why because in our GDT array kernel data is second entry
-        // whose index is 0x10
-        // for CS we will set 0x08 because kernel code is first entry
-
         reload_ds(KERNEL_DATA_SELECTOR);
         reload_cs(KERNEL_CODE_SELECTOR as u64);
     };
