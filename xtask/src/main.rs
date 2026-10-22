@@ -175,7 +175,6 @@ fn stage_iso(config: &Config) -> Result<()> {
         copy_file(&config.splash(), &config.boot_dir().join("splash.png"))?;
     }
 
-  
     Ok(())
 }
 
@@ -253,8 +252,14 @@ fn qemu(config: &Config, debug: bool) -> Result<()> {
         format!("if=pflash,format=raw,file={vars}"),
         "-cdrom".to_string(),
         iso,
+        "-display".to_string(),
+        "gtk".to_string(),
         "-serial".to_string(),
-        "stdio".to_string(),
+        "file:serial.log".to_string(),
+        "-global".to_string(),
+        "isa-debugcon.iobase=0x402".to_string(),
+        "-monitor".to_string(),
+        "none".to_string(),
         "-no-reboot".to_string(),
         "-no-shutdown".to_string(),
     ];
