@@ -1,5 +1,7 @@
 use crate::{drivers::serial::Serial, x86_64::io::Port};
 
+const COM_1_PORT: u16 = 0x3F8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UartError {
     InvalidBaudRate,
@@ -49,15 +51,12 @@ impl Uart {
 }
 
 impl Serial for Uart {
-    // todo: replace with UART sepcific errors
     type Error = UartError;
 
     fn init() -> Result<Self, Self::Error>
     where
         Self: Sized,
     {
-        const COM_1_PORT: u16 = 0x3F8;
-
         let mut port = Port::new(COM_1_PORT + Self::IER);
 
         unsafe {
@@ -140,8 +139,9 @@ impl Serial for Uart {
         Ok(Self)
     }
 
+    #[inline]
     fn read_byte(&self) -> u8 {
-        let lsr = Port::new(0x3F8u16 + Self::LSR);
+        let lsr = Port::new(COM_1_PORT + Self::LSR);
 
         let val = unsafe {
             // bit 0 is Data ready (DR)
@@ -154,14 +154,15 @@ impl Serial for Uart {
         return val;
     }
 
+    #[inline]
     fn write_byte(&mut self, byte: u8) {
-        let lsr = Port::new(0x3F8u16 + Self::LSR);
+        let lsr = Port::new(COM_1_PORT + Self::LSR);
 
         unsafe {
             // bit 5 is Transmitter holding register empty (THRE)
             // Set if the transmission buffer is empty (i.e. data can be sent)
             while lsr.read() & 0x20 == 0 {}
-            Port::new(0x3F8u16).write(byte);
+            Port::new(COM_1_PORT).write(byte);
         }
     }
 }
