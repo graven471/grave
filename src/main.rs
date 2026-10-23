@@ -50,11 +50,6 @@ pub extern "C" fn kernel_main() -> ! {
     load_idt();
     kprintln!("IDT loaded successfully");
 
-    unsafe {
-        let val: u64;
-        core::arch::asm!("mov {}, [0x12345678]", out(reg) val,)
-    }
-
     let boot_info = BootInfo::new();
 
     for y in 0..boot_info.framebuffer.height {
