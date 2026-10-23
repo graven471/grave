@@ -1,4 +1,4 @@
-use limine::memmap::{self, Entry};
+use limine::memmap::{self};
 
 pub struct MemoryMap {
     pub entries: &'static [&'static memmap::Entry],
@@ -6,17 +6,18 @@ pub struct MemoryMap {
 
 impl MemoryMap {
     #[inline]
-    pub fn usable(&self) -> impl Iterator<Item = &&Entry> {
+    pub fn usable(&self) -> impl Iterator<Item = &&'static memmap::Entry> + '_ {
         self.entries
             .iter()
-            .filter(|&&e| e.type_ == memmap::MEMMAP_USABLE)
+            .filter(|entry| entry.type_ == memmap::MEMMAP_USABLE)
     }
 
     #[inline]
-    pub fn reserved(&self) -> impl Iterator<Item = &&Entry> {
+    pub fn reserved(&self) -> impl Iterator<Item = &'static memmap::Entry> + '_ {
         self.entries
             .iter()
-            .filter(|&&e| e.type_ == memmap::MEMMAP_RESERVED)
+            .copied()
+            .filter(|e| e.type_ == memmap::MEMMAP_RESERVED)
     }
 }
 
