@@ -1,4 +1,4 @@
-use crate::{drivers::serial::Serial, x86_64::io::Port};
+use crate::{drivers::serial::Serial, x86_64::cpu::io::Port};
 
 const COM_1_PORT: u16 = 0x3F8;
 

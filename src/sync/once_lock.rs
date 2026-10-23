@@ -19,11 +19,14 @@ impl<T> OnceLock<T> {
             value: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
+
     pub fn get_or_init<F>(&self, f: F) -> &T
     where
         F: FnOnce() -> T,
     {
+        // fixme: disable interrupts
         // todo: for now use relaxed if we need SMP then add proper acquire and release
+        // also x64 is TSO so we can also get away with Relaxed in uniprocessor
         if self.flag.load(Ordering::Relaxed) == false {
             // init the value and return reference
             let ptr = self.value.get();

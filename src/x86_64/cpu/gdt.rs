@@ -20,8 +20,8 @@ use core::arch::{asm, naked_asm};
 const KERNEL_CODE_DESCRIPTOR: u64 = 0x00AF9A000000FFFF;
 const KERNEL_DATA_DESCRIPTOR: u64 = 0x00CF92000000FFFF;
 
-const KERNEL_CODE_SELECTOR: u16 = 0x08;
-const KERNEL_DATA_SELECTOR: u16 = 0x10;
+pub(super) const KERNEL_CODE_SELECTOR: u16 = 0x08;
+pub(super) const KERNEL_DATA_SELECTOR: u16 = 0x10;
 
 const MAX_GDT_ENTRIES: usize = 7;
 

@@ -40,64 +40,36 @@
 // | 32-255 | User     | External Interrupts (IRQ/MSI/MSI-X)   | Interrupt | Depends    |
 // +--------+----------+---------------------------------------+-----------+------------+
 
-// type HandlerFn = extern "x86-interrupt" fn(InterruptFrame);
-// type HandlerFnErr = extern "x86-interrupt" fn(InterruptFrame, u64);
-//     stack_frame: InterruptStackFrame,
-//     error_code: PageFaultErrorCode,
-
+use crate::x86_64::{
+    cpu::gdt::KERNEL_CODE_SELECTOR,
+    interrupts::exceptions::{do_general_protection_fault, do_page_fault},
+};
 use core::arch::asm;
 
-use crate::sync::once_lock::OnceLock;
+use crate::{
+    sync::once_lock::OnceLock,
+    x86_64::{
+        interrupts::{frame::InterruptStackFrame, vector::Vector},
+        types::{DescriptorTablePointer, Dpl, GateType},
+    },
+};
 
-#[repr(u8)]
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
-pub enum GateType {
-    TaskGate = 0x5,
-    InterruptGate = 0xE,
-    TrapGate = 0xF,
-}
-
-#[repr(u8)]
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
-pub enum Dpl {
-    Kernel = 0,
-    User = 3,
-}
-
-#[repr(u8)]
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
-pub enum Vector {
-    DivideError = 0,
-    Debug = 1,
-    Nmi = 2,
-    Breakpoint = 3,
-    Overflow = 4,
-    BoundRange = 5,
-    InvalidOpcode = 6,
-    DeviceNotAvail = 7,
-    DoubleFault = 8,
-    // 9 is reserved (coprocessor segment overrun, obsolete)
-    InvalidTss = 10,
-    SegmentNotPresent = 11,
-    StackSegment = 12,
-    GeneralProtection = 13,
-    PageFault = 14,
-    // 15 reserved
-    X87FloatingPoint = 16,
-    AlignmentCheck = 17,
-    MachineCheck = 18,
-    SimdFloat = 19,
-    Virtualization = 20,
-    ControlProtection = 21,
-    // 22-31 reserved
-}
+#[allow(unused)]
+pub(super) type IdtHandler = extern "x86-interrupt" fn(InterruptStackFrame);
+pub(super) type IdtHandlerWithErrorCode = extern "x86-interrupt" fn(InterruptStackFrame, u64);
 
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy)]
-pub struct IdtEntry([u32; 4]);
+pub(super) struct IdtEntry([u32; 4]);
 
 impl IdtEntry {
-    pub fn new(handler_addr: u64, dpl: Dpl, seg_selector: u16, gate_type: GateType) -> Self {
+    #[inline]
+    pub(super) const fn new(
+        handler_addr: u64,
+        dpl: Dpl,
+        seg_selector: u16,
+        gate_type: GateType,
+    ) -> Self {
         // lower dword offset (0)
         // 15:0 -> offset 15..0 of our exception handler virtual address
         // 31:16 -> Segment Selector for destination code segment
@@ -127,48 +99,33 @@ impl IdtEntry {
 }
 
 #[repr(C, align(16))]
-pub struct Idt([IdtEntry; 256]);
-
-static IDT: OnceLock<Idt> = OnceLock::new();
+pub(super) struct Idt([IdtEntry; 256]);
 
 impl Idt {
-    pub const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self([IdtEntry([0, 0, 0, 0]); 256])
     }
 
-    pub fn register(&mut self, vector: Vector, entry: IdtEntry) {
+    #[inline]
+    pub(super) fn register(&mut self, vector: Vector, entry: IdtEntry) {
         self.0[vector as usize] = entry;
     }
 }
 
-#[repr(C, packed)]
-pub struct DescriptorTablePointer {
-    pub limit: u16,
-    pub base: u64,
-}
-
-// test
-extern "x86-interrupt" fn do_page_fault(stack_frame: u64, error_code: u64) {
-    // remember read cr2 first
-    unsafe { asm!("hlt") }
-}
-
-extern "x86-interrupt" fn do_general_protection_fault(stack_frame: u64, error_code: u64) {
-    unsafe { asm!("hlt") }
-}
+static IDT: OnceLock<Idt> = OnceLock::new();
 
 pub fn load_idt() {
     let pf_entry = IdtEntry::new(
-        do_page_fault as *const () as u64,
+        do_page_fault as IdtHandlerWithErrorCode as u64,
         Dpl::Kernel,
-        0x08,
+        KERNEL_CODE_SELECTOR,
         GateType::InterruptGate,
     );
 
     let gf_entry = IdtEntry::new(
-        do_general_protection_fault as *const () as u64,
+        do_general_protection_fault as IdtHandlerWithErrorCode as u64,
         Dpl::Kernel,
-        0x08,
+        KERNEL_CODE_SELECTOR,
         GateType::InterruptGate,
     );
 

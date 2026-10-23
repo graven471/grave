@@ -4,16 +4,15 @@
 
 use core::panic::PanicInfo;
 
-use core::fmt::Write;
-
 use crate::{
     boot::BootInfo,
-    drivers::serial::{Serial, SerialWriter, uart16550::Uart},
-    x86_64::{gdt::load_gdt, idt::load_idt},
+    drivers::serial::{self},
+    x86_64::cpu::{gdt::load_gdt, idt::load_idt},
 };
 
 pub mod boot;
 pub mod drivers;
+pub mod macros;
 pub mod memory;
 pub mod sync;
 pub mod x86_64;
@@ -37,20 +36,24 @@ pub extern "C" fn _start() -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() -> ! {
-    let uart = Uart::init().expect("failed to init UART");
-    let mut writer = SerialWriter(uart);
-    writeln!(writer, "kernel started").unwrap();
+    serial::init();
 
     for _ in 0..5 {
-        // this is to prevent qemu firmware print cloberring our logs
-        writeln!(writer, "").unwrap();
+        kprintln!("");
     }
 
+    kprintln!("kernel started");
+
     load_gdt();
-    writeln!(writer, "GDT loaded successfully").unwrap();
+    kprintln!("GDT loaded successfully");
 
     load_idt();
-    writeln!(writer, "IDT loaded successfully").unwrap();
+    kprintln!("IDT loaded successfully");
+
+    unsafe {
+        let val: u64;
+        core::arch::asm!("mov {}, [0x12345678]", out(reg) val,)
+    }
 
     let boot_info = BootInfo::new();
 

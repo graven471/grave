@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use super::requests::{BASE_REVISION, FB_REQUEST, HHDM_RESQUEST, MEMORY_MAP_REQUEST, RDSP_REQUEST};
 use crate::memory::map::MemoryMap;
 

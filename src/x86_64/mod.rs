@@ -1,3 +1,3 @@
-pub mod gdt;
-pub mod idt;
-pub mod io;
+pub mod cpu;
+pub(super) mod interrupts;
+pub(super) mod types;
