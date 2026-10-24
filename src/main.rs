@@ -1,4 +1,4 @@
-#![feature(abi_x86_interrupt)]
+#![feature(abi_x86_interrupt, likely_unlikely, contracts)]
 #![no_std]
 #![no_main]
 
@@ -7,7 +7,7 @@ use core::panic::PanicInfo;
 use crate::{
     boot::BootInfo,
     drivers::serial::{self},
-    memory::buddy_test::test_buddy_allocator_init,
+    memory::{buddy_test::test_buddy_allocator_init, hhdm},
     x86_64::cpu::{gdt::load_gdt, idt::load_idt},
 };
 
@@ -52,9 +52,12 @@ pub extern "C" fn kernel_main() -> ! {
     kprintln!("IDT loaded successfully");
 
     let boot_info = BootInfo::new();
+    unsafe {
+        hhdm::init(boot_info.hhdm_offset);
+    }
 
     kprintln!("before allocator test");
-    test_buddy_allocator_init(&boot_info.memory_map, boot_info.hhdm_offset);
+    test_buddy_allocator_init(&boot_info.memory_map);
     kprintln!("buddy allocator test passed");
 
     for y in 0..boot_info.framebuffer.height {
