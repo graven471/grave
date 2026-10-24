@@ -7,7 +7,6 @@ use crate::{
     kprintln,
     memory::{
         address::{PhysAddr, TranslateAddr, VirtAddr},
-        hhdm,
         map::MemoryMap,
     },
 };
@@ -19,8 +18,7 @@ pub struct AllocationError;
 pub trait PhysicalAllocator {
     type Error;
 
-    // hhdm_offset is temp
-    fn init(memory_map: &MemoryMap, /* later add some config etc */) -> Result<Self, Self::Error>
+    fn init(memory_map: &MemoryMap) -> Result<Self, Self::Error>
     where
         Self: Sized;
 
@@ -35,6 +33,15 @@ struct FreeBlock {
     next: *mut FreeBlock,
 }
 
+use core::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+
+#[inline(always)]
+unsafe fn prefetch_read_t0(ptr: *const u8) {
+    unsafe {
+        _mm_prefetch(ptr.cast::<i8>(), _MM_HINT_T0);
+    }
+}
+
 impl FreeBlock {
     #[allow(unused)]
     pub const fn new() -> Self {
@@ -43,8 +50,9 @@ impl FreeBlock {
         }
     }
 
-    pub unsafe fn push(head: *mut *mut FreeBlock, other: *mut FreeBlock) -> bool {
-        if head.is_null() || other.is_null() {
+    #[inline(always)]
+    pub const unsafe fn push(head: *mut *mut FreeBlock, other: *mut FreeBlock) -> bool {
+        if unlikely(head.is_null() || other.is_null()) {
             return false;
         }
         unsafe {
@@ -54,19 +62,21 @@ impl FreeBlock {
         return true;
     }
 
+    #[inline(always)]
     pub unsafe fn pop(head: *mut *mut FreeBlock) -> Option<*mut FreeBlock> {
         unsafe {
-            if head.is_null() {
+            if unlikely(head.is_null()) {
                 return None;
             }
 
             let node = *head;
-
-            if node.is_null() {
+            if unlikely(node.is_null()) {
                 return None;
             }
 
-            if (node as usize) % core::mem::align_of::<FreeBlock>() != 0 {
+            // prefetch_read_t0(node.cast::<u8>());
+
+            if unlikely((node as usize) % core::mem::align_of::<FreeBlock>() != 0) {
                 kprintln!("CORRUPT FREE LIST: node_ptr={:#x}", node as usize);
                 return None;
             }
@@ -78,17 +88,20 @@ impl FreeBlock {
         }
     }
 
-    #[allow(unused)]
+    #[inline]
     pub unsafe fn remove_by_address(
         head: *mut *mut FreeBlock,
         addr: *const FreeBlock,
     ) -> Option<*mut FreeBlock> {
         unsafe {
-            if head.is_null() || addr.is_null() {
+            if unlikely(head.is_null() || addr.is_null()) {
                 return None;
             }
 
-            if (*head).is_null() {
+            prefetch_read_t0((*head).cast());
+            // prefetch_read_t0((**head).next.cast());
+
+            if unlikely((*head).is_null()) {
                 return None;
             }
 
@@ -97,6 +110,10 @@ impl FreeBlock {
             }
 
             let temp = head;
+
+            // todo: need solid proof to use this
+            // prefetch_read_t0((*temp).cast());
+            // prefetch_read_t0((**temp).next.cast());
 
             while !(*temp).is_null() {
                 if core::ptr::eq((**temp).next, addr) {
@@ -109,11 +126,6 @@ impl FreeBlock {
             return None;
         }
     }
-
-    // todo: insert sorted
-    // pub fn insert_sorted(&self, head: *mut *mut FreeBlock, other: *mut FreeBlock) {
-    //     todo!()
-    // }
 }
 
 pub struct BuddyAllocator {
@@ -121,14 +133,17 @@ pub struct BuddyAllocator {
 }
 
 impl BuddyAllocator {
+    #[inline(always)]
     const fn order_to_size(&self, order: usize) -> usize {
         return MIN_SIZE << order;
     }
 
+    #[inline(always)]
     const fn size_to_order(&self, size: usize) -> usize {
-        return (size / MIN_SIZE).ilog2() as usize;
+        return size.ilog2() as usize - 12;
     }
 
+    #[inline(always)]
     fn round_size(&self, layout: Layout) -> usize {
         return layout
             .size()
@@ -136,8 +151,21 @@ impl BuddyAllocator {
             .next_power_of_two()
             .max(MIN_SIZE);
     }
+
+    #[inline(always)]
+    #[allow(unused)]
+    fn is_order_empty(&self, order: usize) -> bool {
+        self.blocks[order].is_null()
+    }
 }
 
+/*
+ * core rules of buddy
+ * S(k) = 2^k          (block size)
+ * B(i, k) = i XOR 2^k (buddy index) where, i = block index, k = order
+ * P(i, k) = i & ~2^k  (parent index)
+ *
+ */
 impl PhysicalAllocator for BuddyAllocator {
     type Error = AllocationError;
 
@@ -180,7 +208,6 @@ impl PhysicalAllocator for BuddyAllocator {
 
                 // block_size(o) = MIN_SIZE * 2^o
                 let block_size = buddy.order_to_size(order) as u64;
-
                 let phys = PhysAddr::new(addr).ok_or(AllocationError)?;
 
                 let block = phys
@@ -202,52 +229,46 @@ impl PhysicalAllocator for BuddyAllocator {
         Ok(buddy)
     }
 
+    #[inline(always)]
     fn alloc(&mut self, layout: Layout) -> Result<PhysAddr, Self::Error> {
         let mut size = self.round_size(layout);
         let requested_order = self.size_to_order(size);
+        let mut actual_order: usize = usize::MAX;
 
-        /*
-        * core rules of buddy
-        * S(k) = 2^k          (block size)
-        * B(i, k) = i XOR 2^k (buddy index) where, i = block index, k = order
-        * P(i, k) = i & ~2^k  (parent index)
-        *
-        *  General splitting formula for any S > 1:
-         let A = [A + A + S), let S = l
-         S_half = S/2
-         A_left = [A, A + S_half)
-         A_right = [A + S_half, A + S)
-        */
-
-        let mut actual_order: Option<usize> = None;
-
+        // todo: try bitmap and see if we can avoid this loop
         for order in (requested_order)..=MAX_ORDER {
-            if !self.blocks[order].is_null() {
-                actual_order = Some(order);
+            if likely(!self.blocks[order].is_null()) {
+                actual_order = order;
+                // unsafe {
+                //     prefetch_read_t0(self.blocks[actual_order].cast());
+                //     prefetch_read_t0((*self.blocks[actual_order]).next.cast());
+                // }
                 break;
             }
         }
 
-        let Some(mut actual_order) = actual_order else {
+        if unlikely(actual_order == usize::MAX) {
             return Err(AllocationError);
-        };
+        }
 
-        size = self.order_to_size(actual_order);
         let mut splits_remaining = actual_order - requested_order;
-
-        // fast path
-        if splits_remaining == 0 {
+        if likely(splits_remaining == 0) {
             let block = unsafe { FreeBlock::pop(&raw mut self.blocks[requested_order]) }
-                .filter(|b| !b.is_null())
                 .ok_or(AllocationError)?;
+
             let virt = VirtAddr::new(block as u64).ok_or(AllocationError)?;
-            kprintln!("allocated address = {:#x}", (block as u64) - hhdm::offset());
+            // kprintln!("allocated address = {:#x}", (block as u64) - hhdm::offset());
             return virt.translate().ok_or(AllocationError);
         }
 
+        size = self.order_to_size(actual_order);
         let mut block: *mut FreeBlock = core::ptr::null_mut();
 
-        while splits_remaining > 0 {
+        unsafe {
+            prefetch_read_t0(self.blocks[actual_order].cast());
+        }
+
+        while likely(splits_remaining > 0) {
             debug_assert_eq!(size, self.order_to_size(actual_order));
             debug_assert!(actual_order > requested_order);
 
@@ -256,36 +277,37 @@ impl PhysicalAllocator for BuddyAllocator {
             // A_left = [A, A + S_half)
             // A_right = [A + S_half, A + S)
             let sh = (size >> 1) as u64;
-
             let lower_order = actual_order - 1;
 
-            block = unsafe { FreeBlock::pop(&mut self.blocks[actual_order]) }
-                .filter(|b| !b.is_null())
-                .ok_or(AllocationError)?;
+            block =
+                unsafe { FreeBlock::pop(&mut self.blocks[actual_order]) }.ok_or(AllocationError)?;
 
             let block_addr = block as u64;
 
-            let left_start = block_addr;
-            let left_end = block_addr + sh;
+            // let left_start = block_addr;
+            // let left_end = block_addr + sh;
             let right_start = block_addr + sh;
-            let right_end = block_addr + (size as u64);
+            // let right_end = block_addr + (size as u64);
 
-            kprintln!(
-                "req_order = {}, req_size: {}, actual_size: {}, actual_order = {}, lower_order = {}, left_start = {:#x}, left_end = {:#x}, right_start = {:#x}, right_end = {:#x}, left_block: {:#x}",
-                requested_order,
-                layout.size(),
-                size,
-                actual_order,
-                lower_order,
-                left_start,
-                left_end,
-                right_start,
-                right_end,
-                block_addr
-            );
+            // kprintln!(
+            //     "req_order = {}, req_size: {}, actual_size: {}, actual_order = {}, lower_order = {}, left_start = {:#x}, left_end = {:#x}, right_start = {:#x}, right_end = {:#x}, left_block: {:#x}",
+            //     requested_order,
+            //     layout.size(),
+            //     size,
+            //     actual_order,
+            //     lower_order,
+            //     left_start,
+            //     left_end,
+            //     right_start,
+            //     right_end,
+            //     block_addr
+            // );
 
             unsafe {
-                if !FreeBlock::push(&mut self.blocks[lower_order], right_start as *mut FreeBlock) {
+                if unlikely(!FreeBlock::push(
+                    &mut self.blocks[lower_order],
+                    right_start as *mut FreeBlock,
+                )) {
                     return Err(AllocationError);
                 }
             }
@@ -294,13 +316,14 @@ impl PhysicalAllocator for BuddyAllocator {
             size = sh as usize;
             splits_remaining -= 1;
         }
-        kprintln!("allocated address = {:#x}", (block as u64) - hhdm::offset());
+        // kprintln!("allocated address = {:#x}", (block as u64) - hhdm::offset());
         let virt = VirtAddr::new(block as u64).ok_or(AllocationError)?;
         return virt.translate().ok_or(AllocationError);
     }
 
+    #[inline(always)]
     fn free(&mut self, ptr: PhysAddr, layout: Layout) -> Result<(), Self::Error> {
-        if ptr.as_ptr::<u64>().is_null() {
+        if unlikely(ptr.as_ptr::<u64>().is_null()) {
             return Err(AllocationError);
         }
 
@@ -337,9 +360,12 @@ impl PhysicalAllocator for BuddyAllocator {
             if order == MAX_ORDER {
                 break;
             }
-
             order += 1;
         }
+
+        // unsafe {
+        //     prefetch_read_t0(self.blocks[order].cast());
+        // }
 
         unsafe {
             FreeBlock::push(
@@ -350,7 +376,6 @@ impl PhysicalAllocator for BuddyAllocator {
                     .as_mut_ptr::<FreeBlock>(),
             );
         }
-
         return Ok(());
     }
 }

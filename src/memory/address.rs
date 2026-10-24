@@ -1,5 +1,3 @@
-use crate::memory::hhdm;
-
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct PhysAddr(u64);
@@ -73,15 +71,6 @@ impl VirtAddr {
         self.0 as *mut T
     }
 }
-
-// #[inline(always)]
-// pub fn phys_to_virt(phys: PhysAddr) -> u64 {
-//     return phys.as_64() + hhdm::offset();
-// }
-//
-// pub const fn virt_to_phys(_virt: u64) -> u64 {
-//     todo!()
-// }
 
 pub trait TranslateAddr<T> {
     fn translate(self) -> Option<T>;

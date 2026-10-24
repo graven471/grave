@@ -18,12 +18,14 @@ struct Config {
 }
 
 impl Config {
-    fn new() -> Result<Self> {
+    fn new(release: bool) -> Result<Self> {
         let root = env::current_dir()?;
         let build = root.join("build");
 
+        let profile = if release { "release" } else { "debug" };
+
         Ok(Self {
-            kernel: root.join("target/x86_64-unknown-none/debug/grave"),
+            kernel: root.join(format!("target/x86_64-unknown-none/{profile}/grave")),
             iso_root: build.join("iso"),
             iso: build.join("kernel.iso"),
             firmware: root.join("boot/firmware"),
@@ -98,6 +100,7 @@ fn copy_file(source: &Path, destination: &Path) -> Result<()> {
 
     fs::copy(source, destination)?;
     println!("  {} -> {}", source.display(), destination.display());
+
     Ok(())
 }
 
@@ -122,12 +125,14 @@ fn system_ovmf_file(names: &[&str]) -> Result<PathBuf> {
     })
 }
 
-fn build_kernel(config: &Config) -> Result<()> {
-    run(
-        "cargo",
-        &["build", "--target", "x86_64-unknown-none"],
-        Some(&config.root),
-    )?;
+fn build_kernel(config: &Config, release: bool) -> Result<()> {
+    let mut args = vec!["build", "--target", "x86_64-unknown-none"];
+
+    if release {
+        args.push("--release");
+    }
+
+    run("cargo", &args, Some(&config.root))?;
 
     if !config.kernel.is_file() {
         return Err(format!(
@@ -178,8 +183,8 @@ fn stage_iso(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn make_iso(config: &Config) -> Result<()> {
-    build_kernel(config)?;
+fn make_iso(config: &Config, release: bool) -> Result<()> {
+    build_kernel(config, release)?;
     ensure_limine(config)?;
     stage_iso(config)?;
 
@@ -207,6 +212,7 @@ fn make_iso(config: &Config) -> Result<()> {
     )?;
 
     println!("ISO created: {}", config.iso.display());
+
     Ok(())
 }
 
@@ -229,8 +235,8 @@ fn prepare_firmware(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn qemu(config: &Config, debug: bool) -> Result<()> {
-    make_iso(config)?;
+fn qemu(config: &Config, debug: bool, release: bool) -> Result<()> {
+    make_iso(config, release)?;
     prepare_firmware(config)?;
 
     let code = config.firmware_code().to_string_lossy().into_owned();
@@ -260,10 +266,6 @@ fn qemu(config: &Config, debug: bool) -> Result<()> {
         "isa-debugcon.iobase=0x402".to_string(),
         "-monitor".to_string(),
         "none".to_string(),
-        // "-d".to_string(),
-        // "int,cpu_reset".to_string(),
-        // "-D".to_string(),
-        // "/tmp/qemu.log".to_string(),
         "-no-reboot".to_string(),
         "-no-shutdown".to_string(),
     ];
@@ -274,6 +276,7 @@ fn qemu(config: &Config, debug: bool) -> Result<()> {
     }
 
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
     run("qemu-system-x86_64", &refs, Some(&config.root))
 }
 
@@ -282,35 +285,48 @@ fn clean(config: &Config) -> Result<()> {
         fs::remove_dir_all(&config.build)?;
     }
 
-    // Keep the user's firmware copies, matching the original Makefile's
-    // behavior: `clean` removes build output, not boot/firmware.
+    // Keep firmware copies, matching the original Makefile's behavior.
     println!("Removed {}", config.build.display());
+
     Ok(())
 }
 
 fn usage() {
     eprintln!(
-        "Usage: cargo xtask <command>\n\
+        "Usage: cargo xtask <command> [--release]\n\
          Commands:\n\
            build   Compile the kernel ELF\n\
-           limine  Fetch/build the pinned Limine UEFI bootloader\n\
+           limine  Check for the pinned Limine UEFI bootloader files\n\
            iso     Build the UEFI bootable ISO\n\
            run     Boot the ISO in QEMU\n\
            debug   Boot QEMU paused with a GDB server on port 1234\n\
-           clean   Remove generated build artifacts"
+           clean   Remove generated build artifacts\n\
+         Options:\n\
+           --release   Build the kernel using Cargo's release profile"
     );
 }
 
 fn main() -> Result<()> {
-    let config = Config::new()?;
-    let command = env::args().nth(1).unwrap_or_default();
+    let mut args = env::args().skip(1);
+    let command = args.next().unwrap_or_default();
+
+    let mut release = false;
+
+    for arg in args {
+        match arg.as_str() {
+            "--release" => release = true,
+            _ => return Err(format!("Unknown argument: {arg}").into()),
+        }
+    }
+
+    let config = Config::new(release)?;
 
     match command.as_str() {
-        "build" => build_kernel(&config),
+        "build" => build_kernel(&config, release),
         "limine" => ensure_limine(&config),
-        "iso" => make_iso(&config),
-        "run" => qemu(&config, false),
-        "debug" => qemu(&config, true),
+        "iso" => make_iso(&config, release),
+        "run" => qemu(&config, false, release),
+        "debug" => qemu(&config, true, release),
         "clean" => clean(&config),
         _ => {
             usage();

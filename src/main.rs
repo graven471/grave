@@ -1,4 +1,4 @@
-#![feature(abi_x86_interrupt, likely_unlikely, contracts)]
+#![feature(abi_x86_interrupt, likely_unlikely)]
 #![no_std]
 #![no_main]
 
@@ -7,7 +7,10 @@ use core::panic::PanicInfo;
 use crate::{
     boot::BootInfo,
     drivers::serial::{self},
-    memory::{buddy_test::test_buddy_allocator_stress, hhdm},
+    memory::{
+        buddy_test::{test_buddy_allocator_benchmark, test_buddy_allocator_stress},
+        hhdm,
+    },
     x86_64::cpu::{gdt::load_gdt, idt::load_idt},
 };
 
@@ -57,7 +60,7 @@ pub extern "C" fn kernel_main() -> ! {
     }
 
     kprintln!("before allocator test");
-    test_buddy_allocator_stress(&boot_info.memory_map);
+    test_buddy_allocator_benchmark(&boot_info.memory_map);
     kprintln!("buddy allocator test passed");
 
     for y in 0..boot_info.framebuffer.height {

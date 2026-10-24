@@ -1,5 +1,8 @@
 #![allow(unused)]
-use core::alloc::Layout;
+use core::{
+    alloc::Layout,
+    arch::x86_64::{__rdtscp, _rdtsc},
+};
 
 use crate::{
     kprintln,
@@ -548,6 +551,18 @@ pub fn test_buddy_allocator_stress(memory_map: &MemoryMap) {
     TEST_RUNNING.store(false, Ordering::Release);
 }
 
+pub fn test_buddy_allocator_benchmark(memory_map: &MemoryMap) {
+    let mut allocator =
+        BuddyAllocator::init(memory_map).expect("buddy allocator initialization failed");
+
+    kprintln!("=== buddy allocator benchmark ===");
+
+    // benchmark_buddy_allocator(&mut allocator);
+    benchmark_buddy_allocator_2(&mut allocator);
+
+    kprintln!("=== benchmark complete ===");
+}
+
 struct ExhaustionRng(u64);
 
 impl ExhaustionRng {
@@ -564,4 +579,224 @@ impl ExhaustionRng {
         assert!(upper > 0);
         (self.next() as usize) % upper
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn read_tsc() -> u64 {
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+#[inline(always)]
+unsafe fn read_tsc_start() -> u64 {
+    unsafe {
+        core::arch::asm!("lfence", options(nostack, preserves_flags));
+        core::arch::x86_64::_rdtsc()
+    }
+}
+
+// #[inline(always)]
+// unsafe fn read_tsc_end() -> u64 {
+//     unsafe {
+//         let mut aux: u32 = 0;
+//         let ticks = core::arch::x86_64::__rdtscp(&mut aux);
+//         core::arch::asm!("lfence", options(nostack, preserves_flags));
+//         ticks
+//     }
+// }
+//
+use core::arch::asm;
+
+#[inline]
+pub unsafe fn read_tsc_serialized() -> u64 {
+    unsafe {
+        let lo: u32;
+        let hi: u32;
+
+        asm!(
+            "lfence",
+            "rdtsc",
+            lateout("eax") lo,
+            lateout("edx") hi,
+            options(nomem, nostack, preserves_flags),
+        );
+
+        ((hi as u64) << 32) | (lo as u64)
+    }
+}
+
+#[inline(always)]
+pub unsafe fn read_tsc_end() -> u64 {
+    unsafe {
+        let lo: u32;
+        let hi: u32;
+        let aux: u32;
+
+        asm!(
+            "rdtscp",
+            "lfence",
+            lateout("eax") lo,
+            lateout("edx") hi,
+            lateout("ecx") aux,
+            options(nomem, nostack, preserves_flags),
+        );
+
+        let _ = aux;
+        ((hi as u64) << 32) | (lo as u64)
+    }
+}
+
+pub fn benchmark_buddy_allocator(allocator: &mut BuddyAllocator) {
+    const ITERATIONS: usize = 1000;
+
+    let layout = Layout::from_size_align(4096, 4096).unwrap();
+
+    let mut alloc_cycles = 0u64;
+    let mut free_cycles = 0u64;
+
+    // Warm up first.
+    for _ in 0..10_000 {
+        let allocation = allocator.alloc(layout).unwrap();
+        allocator.free(allocation, layout).unwrap();
+    }
+
+    for _ in 0..ITERATIONS {
+        // Benchmark allocation
+        let start = unsafe { read_tsc_serialized() };
+        let allocation = allocator.alloc(layout).expect("allocation failed");
+        let end = unsafe { read_tsc_end() };
+
+        alloc_cycles += end - start;
+
+        // Benchmark free
+        let start = unsafe { read_tsc_serialized() };
+        allocator.free(allocation, layout).expect("free failed");
+        let end = unsafe { read_tsc_end() };
+
+        free_cycles += end - start;
+    }
+
+    kprintln!(
+        "alloc average: {} TSC ticks",
+        alloc_cycles / ITERATIONS as u64
+    );
+
+    kprintln!(
+        "free average: {} TSC ticks",
+        free_cycles / ITERATIONS as u64
+    );
+}
+
+const ITERATIONS: usize = 10000;
+
+static mut ALLOC_LATENCIES: [u64; ITERATIONS] = [0; ITERATIONS];
+static mut FREE_LATENCIES: [u64; ITERATIONS] = [0; ITERATIONS];
+
+pub fn benchmark_buddy_allocator_2(allocator: &mut BuddyAllocator) {
+    let layout = Layout::from_size_align(4096, 4096).unwrap();
+
+    // Warm up before collecting measurements.
+    for _ in 0..100 {
+        let ptr = allocator.alloc(layout).expect("allocation failed");
+        allocator.free(ptr, layout).expect("free failed");
+    }
+
+    let alloc_ptr = core::ptr::addr_of_mut!(ALLOC_LATENCIES).cast::<u64>();
+    let free_ptr = core::ptr::addr_of_mut!(FREE_LATENCIES).cast::<u64>();
+
+    for i in 0..ITERATIONS {
+        let start = unsafe { read_tsc_start() };
+        let allocation = allocator.alloc(layout).expect("allocation failed");
+        let end = unsafe { read_tsc_end() };
+
+        unsafe {
+            alloc_ptr.add(i).write(end - start);
+        }
+
+        let start = unsafe { read_tsc_start() };
+        allocator.free(allocation, layout).expect("free failed");
+        let end = unsafe { read_tsc_end() };
+
+        unsafe {
+            free_ptr.add(i).write(end - start);
+        }
+    }
+
+    unsafe {
+        report_latency("alloc 4 KiB", alloc_ptr, ITERATIONS);
+        report_latency("free 4 KiB", free_ptr, ITERATIONS);
+    }
+}
+
+pub fn benchmark_buddy_allocator_2_split(allocator: &mut BuddyAllocator) {
+    const ALLOC_COUNT: usize = ITERATIONS;
+    let layout = Layout::from_size_align(4096, 4096).unwrap();
+
+    static mut ALLOCATIONS: [*mut u8; ITERATIONS] = [core::ptr::null_mut(); ITERATIONS];
+
+    let alloc_ptr = core::ptr::addr_of_mut!(ALLOC_LATENCIES).cast::<u64>();
+    let free_ptr = core::ptr::addr_of_mut!(FREE_LATENCIES).cast::<u64>();
+    let allocations_ptr = core::ptr::addr_of_mut!(ALLOCATIONS).cast::<*mut u8>();
+
+    // Keep every allocation live to prevent immediate reuse.
+    for i in 0..ALLOC_COUNT {
+        let start = unsafe { read_tsc_start() };
+        let ptr = allocator.alloc(layout).expect("allocation failed");
+        let end = unsafe { read_tsc_end() };
+
+        unsafe {
+            alloc_ptr.add(i).write(end - start);
+            allocations_ptr.add(i).write(ptr.as_mut_ptr::<u8>());
+        }
+    }
+
+    for i in 0..ALLOC_COUNT {
+        let ptr = unsafe { allocations_ptr.add(i).read() };
+
+        let start = unsafe { read_tsc_start() };
+        allocator
+            .free(unsafe { PhysAddr::new_unchecked(ptr as u64) }, layout)
+            .expect("free failed");
+        let end = unsafe { read_tsc_end() };
+        unsafe {
+            free_ptr.add(i).write(end - start);
+        }
+    }
+    unsafe {
+        report_latency("alloc 4 KiB", alloc_ptr, ITERATIONS);
+        report_latency("free 4 KiB", free_ptr, ITERATIONS);
+    }
+}
+
+unsafe fn report_latency(label: &str, values: *mut u64, len: usize) {
+    // Sort in place to calculate distribution statistics.
+    for i in 1..len {
+        let value = unsafe { *values.add(i) };
+        let mut j = i;
+
+        while j > 0 && unsafe { *values.add(j - 1) } > value {
+            unsafe {
+                *values.add(j) = *values.add(j - 1);
+            }
+            j -= 1;
+        }
+
+        unsafe {
+            *values.add(j) = value;
+        }
+    }
+
+    let mut total = 0u64;
+    for i in 0..len {
+        total += unsafe { *values.add(i) };
+    }
+
+    kprintln!(
+        "{}: min={} median={} avg={} max={} TSC ticks",
+        label,
+        unsafe { *values },
+        unsafe { *values.add(len / 2) },
+        total / len as u64,
+        unsafe { *values.add(len - 1) },
+    );
 }
