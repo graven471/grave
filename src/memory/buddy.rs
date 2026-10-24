@@ -25,7 +25,7 @@ pub trait PhysicalAllocator {
         Self: Sized;
 
     fn alloc(&mut self, layout: Layout) -> Result<PhysAddr, Self::Error>;
-    fn free(&mut self, ptr: PhysAddr, layout: Layout);
+    fn free(&mut self, ptr: PhysAddr, layout: Layout) -> Result<(), Self::Error>;
 }
 
 const MIN_SIZE: usize = 4096;
@@ -44,30 +44,14 @@ impl FreeBlock {
     }
 
     pub unsafe fn push(head: *mut *mut FreeBlock, other: *mut FreeBlock) -> bool {
-        unsafe {
-            if head.is_null() || other.is_null() {
-                return false;
-            }
-
-            // head -> null
-            if (*head).is_null() {
-                (*other).next = core::ptr::null_mut();
-                *head = other;
-                return true;
-            }
-
-            // head -> [x] -> null
-            if (**head).next.is_null() {
-                (**head).next = other;
-                return true;
-            }
-
-            // general case
-            (*other).next = *head;
-            (*head) = other;
-
-            return true;
+        if head.is_null() || other.is_null() {
+            return false;
         }
+        unsafe {
+            (*other).next = *head;
+            *head = other;
+        }
+        return true;
     }
 
     pub unsafe fn pop(head: *mut *mut FreeBlock) -> Option<*mut FreeBlock> {
@@ -76,24 +60,26 @@ impl FreeBlock {
                 return None;
             }
 
-            // head -> null
-            if (*head).is_null() {
+            let node = *head;
+
+            if node.is_null() {
                 return None;
             }
 
-            // head -> [x] -> [y] -> null
-            // head -> [y] -> null
+            if (node as usize) % core::mem::align_of::<FreeBlock>() != 0 {
+                kprintln!("CORRUPT FREE LIST: node_ptr={:#x}", node as usize);
+                return None;
+            }
 
-            let node_ptr = *head;
-            *head = (*node_ptr).next;
+            *head = (*node).next;
+            (*node).next = core::ptr::null_mut();
 
-            return Some(node_ptr);
+            return Some(node);
         }
     }
 
     #[allow(unused)]
     pub unsafe fn remove_by_address(
-        &mut self,
         head: *mut *mut FreeBlock,
         addr: *const FreeBlock,
     ) -> Option<*mut FreeBlock> {
@@ -118,7 +104,7 @@ impl FreeBlock {
                     (**temp).next = (*node_ptr).next;
                     return Some(node_ptr);
                 }
-                (*temp) = (**temp).next;
+                *temp = (**temp).next;
             }
             return None;
         }
@@ -195,15 +181,6 @@ impl PhysicalAllocator for BuddyAllocator {
                 // block_size(o) = MIN_SIZE * 2^o
                 let block_size = buddy.order_to_size(order) as u64;
 
-                kprintln!(
-                    "order = {:#x}, block_size = {:#x}, align_limit = {:#x}, addr = {:#x}, remaining = {:#x}",
-                    order,
-                    block_size,
-                    alignment_limit,
-                    addr,
-                    remaining
-                );
-
                 let phys = PhysAddr::new(addr).ok_or(AllocationError)?;
 
                 let block = phys
@@ -222,12 +199,11 @@ impl PhysicalAllocator for BuddyAllocator {
                 remaining -= block_size;
             }
         }
-        kprintln!("hhdm is: {:#x}", hhdm::offset());
         Ok(buddy)
     }
 
     fn alloc(&mut self, layout: Layout) -> Result<PhysAddr, Self::Error> {
-        let size = self.round_size(layout);
+        let mut size = self.round_size(layout);
         let requested_order = self.size_to_order(size);
 
         /*
@@ -252,10 +228,11 @@ impl PhysicalAllocator for BuddyAllocator {
             }
         }
 
-        let Some(actual_order) = actual_order else {
+        let Some(mut actual_order) = actual_order else {
             return Err(AllocationError);
         };
 
+        size = self.order_to_size(actual_order);
         let mut splits_remaining = actual_order - requested_order;
 
         // fast path
@@ -268,16 +245,19 @@ impl PhysicalAllocator for BuddyAllocator {
             return virt.translate().ok_or(AllocationError);
         }
 
-        kprintln!("split needed = {}", splits_remaining);
-
         let mut block: *mut FreeBlock = core::ptr::null_mut();
 
         while splits_remaining > 0 {
+            debug_assert_eq!(size, self.order_to_size(actual_order));
+            debug_assert!(actual_order > requested_order);
+
             // let A = [A + A + S), let S = l
             // S_half = S/2
             // A_left = [A, A + S_half)
             // A_right = [A + S_half, A + S)
             let sh = (size >> 1) as u64;
+
+            let lower_order = actual_order - 1;
 
             block = unsafe { FreeBlock::pop(&mut self.blocks[actual_order]) }
                 .filter(|b| !b.is_null())
@@ -289,9 +269,6 @@ impl PhysicalAllocator for BuddyAllocator {
             let left_end = block_addr + sh;
             let right_start = block_addr + sh;
             let right_end = block_addr + (size as u64);
-
-            // A = 200, S/2 = 16 then left = 200..216, right = 216..232
-            let lower_order = actual_order.saturating_sub(1);
 
             kprintln!(
                 "req_order = {}, req_size: {}, actual_size: {}, actual_order = {}, lower_order = {}, left_start = {:#x}, left_end = {:#x}, right_start = {:#x}, right_end = {:#x}, left_block: {:#x}",
@@ -312,6 +289,9 @@ impl PhysicalAllocator for BuddyAllocator {
                     return Err(AllocationError);
                 }
             }
+
+            actual_order = lower_order;
+            size = sh as usize;
             splits_remaining -= 1;
         }
         kprintln!("allocated address = {:#x}", (block as u64) - hhdm::offset());
@@ -319,7 +299,58 @@ impl PhysicalAllocator for BuddyAllocator {
         return virt.translate().ok_or(AllocationError);
     }
 
-    fn free(&mut self, ptr: PhysAddr, layout: Layout) {
-        todo!()
+    fn free(&mut self, ptr: PhysAddr, layout: Layout) -> Result<(), Self::Error> {
+        if ptr.as_ptr::<u64>().is_null() {
+            return Err(AllocationError);
+        }
+
+        let size = self.round_size(layout);
+        let mut order = self.size_to_order(size);
+        let mut curr_block_addr: u64;
+
+        loop {
+            let block_size = self.order_to_size(order) as u64;
+            let buddy_addr_phys = ptr.as_64() ^ block_size;
+            let buddy_addr_virt = ptr.translate().ok_or(AllocationError)?;
+
+            let block = unsafe {
+                FreeBlock::remove_by_address(
+                    &mut self.blocks[order],
+                    buddy_addr_virt.as_mut_ptr::<FreeBlock>(),
+                )
+            };
+
+            let Some(_) = block else {
+                unsafe {
+                    FreeBlock::push(
+                        &mut self.blocks[order],
+                        ptr.translate()
+                            .ok_or(AllocationError)?
+                            .as_mut_ptr::<FreeBlock>(),
+                    );
+                };
+                return Ok(());
+            };
+
+            curr_block_addr = ptr.as_64().min(buddy_addr_phys);
+
+            if order == MAX_ORDER {
+                break;
+            }
+
+            order += 1;
+        }
+
+        unsafe {
+            FreeBlock::push(
+                &mut self.blocks[order],
+                PhysAddr::new_unchecked(curr_block_addr)
+                    .translate()
+                    .ok_or(AllocationError)?
+                    .as_mut_ptr::<FreeBlock>(),
+            );
+        }
+
+        return Ok(());
     }
 }

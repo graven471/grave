@@ -7,7 +7,7 @@ use core::panic::PanicInfo;
 use crate::{
     boot::BootInfo,
     drivers::serial::{self},
-    memory::{buddy_test::test_buddy_allocator_init, hhdm},
+    memory::{buddy_test::test_buddy_allocator_stress, hhdm},
     x86_64::cpu::{gdt::load_gdt, idt::load_idt},
 };
 
@@ -57,7 +57,7 @@ pub extern "C" fn kernel_main() -> ! {
     }
 
     kprintln!("before allocator test");
-    test_buddy_allocator_init(&boot_info.memory_map);
+    test_buddy_allocator_stress(&boot_info.memory_map);
     kprintln!("buddy allocator test passed");
 
     for y in 0..boot_info.framebuffer.height {
@@ -78,7 +78,9 @@ pub extern "C" fn kernel_main() -> ! {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    kprintln!("KERNEL PANIC: {}", info);
+
     loop {
         core::hint::spin_loop();
     }
