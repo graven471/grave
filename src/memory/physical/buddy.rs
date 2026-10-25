@@ -12,10 +12,6 @@ use crate::memory::{
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::utils::prefetch_read_t0;
 
-// temp
-#[derive(Debug)]
-pub struct AllocationError;
-
 use core::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,11 +58,48 @@ impl fmt::Display for BuddyError {
 
 impl core::error::Error for BuddyError {}
 
+pub struct Bitmap {
+    value: u16,
+}
+
+impl Bitmap {
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self { value: 0 }
+    }
+
+    #[inline(always)]
+    pub const fn value(&self) -> u16 {
+        self.value
+    }
+
+    #[inline(always)]
+    pub const fn set_bit(&mut self, index: u16) {
+        self.value |= 1u16 << index;
+    }
+
+    #[inline(always)]
+    pub const fn clear_bit(&mut self, index: u16) {
+        self.value &= !(1u16 << index);
+    }
+
+    #[inline(always)]
+    pub const fn check_bit(&self, index: u16) -> bool {
+        (self.value & (1u16 << index)) != 0
+    }
+
+    #[inline(always)]
+    pub const fn lowest_set_bit(&self) -> u32 {
+        self.value.trailing_zeros()
+    }
+}
+
 const MIN_SIZE: usize = 4096;
 const MAX_ORDER: usize = 11;
 
 pub struct BuddyAllocator {
     blocks: [*mut FreeBlock; MAX_ORDER + 1],
+    bitmap: Bitmap,
 }
 
 impl BuddyAllocator {
@@ -105,6 +138,7 @@ impl PhysicalAllocator for BuddyAllocator {
     {
         let mut buddy = Self {
             blocks: [core::ptr::null_mut(); MAX_ORDER + 1],
+            bitmap: Bitmap::new(),
         };
 
         for entry in memory_map.usable() {
@@ -151,6 +185,7 @@ impl PhysicalAllocator for BuddyAllocator {
                         return Err(BuddyError::CorruptedFreeList);
                     }
                 }
+                buddy.bitmap.set_bit(order as u16);
 
                 addr += block_size;
                 remaining -= block_size;
@@ -163,27 +198,26 @@ impl PhysicalAllocator for BuddyAllocator {
     fn alloc(&mut self, layout: Layout) -> Result<PhysAddr, Self::Error> {
         let mut size = self.round_size(layout);
         let requested_order = self.size_to_order(size);
-        let mut actual_order: usize = usize::MAX;
 
-        for order in (requested_order)..=MAX_ORDER {
-            if likely(!self.blocks[order].is_null()) {
-                actual_order = order;
-                break;
-            }
-        }
-
-        if unlikely(actual_order == usize::MAX) {
-            return Err(BuddyError::NoUsableMemory);
-        }
-
-        let mut splits_remaining = actual_order - requested_order;
-        if likely(splits_remaining == 0) {
-            let block = unsafe { FreeBlock::pop(&raw mut self.blocks[requested_order]) }
-                .ok_or(BuddyError::CorruptedFreeList)?;
-            let virt = VirtAddr::new(block as u64).ok_or(BuddyError::InvalidAddress)?;
+        if likely(!self.blocks[requested_order].is_null()) {
+            let block = unsafe { FreeBlock::pop(&raw mut self.blocks[requested_order]) };
+            let virt = unsafe { VirtAddr::new_unchecked(block as u64) };
             return virt.translate().ok_or(BuddyError::InvalidAddress);
         }
 
+        // check if bitmap is stall since we are not clearing in fast path
+        if self.blocks[requested_order].is_null() {
+            self.bitmap.clear_bit(requested_order as u16);
+        }
+
+        let masked = self.bitmap.value() & (u16::MAX << requested_order);
+        let mut actual_order = masked.trailing_zeros() as usize;
+
+        if unlikely(actual_order > MAX_ORDER) {
+            return Err(BuddyError::OutOfMemory);
+        }
+
+        let mut splits_remaining = actual_order - requested_order;
         size = self.order_to_size(actual_order);
         let mut block: *mut FreeBlock = core::ptr::null_mut();
 
@@ -196,32 +230,32 @@ impl PhysicalAllocator for BuddyAllocator {
             debug_assert_eq!(size, self.order_to_size(actual_order));
             debug_assert!(actual_order > requested_order);
 
-            // let A = [A + A + S), let S = l
-            // S_half = S/2
-            // A_left = [A, A + S_half)
-            // A_right = [A + S_half, A + S)
             let sh = (size >> 1) as u64;
             let lower_order = actual_order - 1;
 
-            block = unsafe { FreeBlock::pop(&mut self.blocks[actual_order]) }
-                .ok_or(BuddyError::CorruptedFreeList)?;
+            block = unsafe { FreeBlock::pop(&mut self.blocks[actual_order]) };
+            debug_assert!(!block.is_null());
+
+            if self.blocks[actual_order].is_null() {
+                self.bitmap.clear_bit(actual_order as u16);
+            }
 
             let block_addr = block as u64;
             let right_start = block_addr + sh;
 
-            unsafe {
-                if unlikely(!FreeBlock::push(
-                    &mut self.blocks[lower_order],
-                    right_start as *mut FreeBlock,
-                )) {
-                    return Err(BuddyError::CorruptedFreeList);
-                }
+            if unlikely(!unsafe {
+                FreeBlock::push(&mut self.blocks[lower_order], right_start as *mut FreeBlock)
+            }) {
+                return Err(BuddyError::CorruptedFreeList);
             }
+
+            self.bitmap.set_bit(lower_order as u16);
 
             actual_order = lower_order;
             size = sh as usize;
             splits_remaining -= 1;
         }
+
         let virt = VirtAddr::new(block as u64).ok_or(BuddyError::InvalidAddress)?;
         return virt.translate().ok_or(BuddyError::InvalidAddress);
     }
@@ -233,8 +267,8 @@ impl PhysicalAllocator for BuddyAllocator {
         }
 
         let size = self.round_size(layout);
-        let mut order = self.size_to_order(size);
         let mut curr_block_addr: u64;
+        let mut order = self.size_to_order(size);
 
         loop {
             let block_size = self.order_to_size(order) as u64;
@@ -257,6 +291,10 @@ impl PhysicalAllocator for BuddyAllocator {
                             .as_mut_ptr::<FreeBlock>(),
                     );
                 };
+                // 1 is free and 0 is not free in buddy
+                if self.blocks[order].is_null() {
+                    self.bitmap.set_bit(order as u16);
+                }
                 return Ok(());
             };
 
@@ -277,6 +315,7 @@ impl PhysicalAllocator for BuddyAllocator {
                     .as_mut_ptr::<FreeBlock>(),
             );
         }
+        self.bitmap.set_bit(order as u16);
         return Ok(());
     }
 }

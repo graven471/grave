@@ -559,6 +559,7 @@ pub fn test_buddy_allocator_benchmark(memory_map: &MemoryMap) {
 
     // benchmark_buddy_allocator(&mut allocator);
     benchmark_buddy_allocator_2(&mut allocator);
+    // benchmark_buddy_allocator_2_split(&mut allocator);
 
     kprintln!("=== benchmark complete ===");
 }
@@ -647,7 +648,7 @@ pub unsafe fn read_tsc_end() -> u64 {
 }
 
 pub fn benchmark_buddy_allocator(allocator: &mut BuddyAllocator) {
-    const ITERATIONS: usize = 1000;
+    const ITERATIONS: usize = 3000;
 
     let layout = Layout::from_size_align(4096, 4096).unwrap();
 
@@ -687,7 +688,7 @@ pub fn benchmark_buddy_allocator(allocator: &mut BuddyAllocator) {
     );
 }
 
-const ITERATIONS: usize = 10000;
+const ITERATIONS: usize = 2000;
 
 static mut ALLOC_LATENCIES: [u64; ITERATIONS] = [0; ITERATIONS];
 static mut FREE_LATENCIES: [u64; ITERATIONS] = [0; ITERATIONS];
@@ -769,7 +770,11 @@ pub fn benchmark_buddy_allocator_2_split(allocator: &mut BuddyAllocator) {
 }
 
 unsafe fn report_latency(label: &str, values: *mut u64, len: usize) {
-    // Sort in place to calculate distribution statistics.
+    if len == 0 {
+        return;
+    }
+
+    // Sort samples in ascending order.
     for i in 1..len {
         let value = unsafe { *values.add(i) };
         let mut j = i;
@@ -786,16 +791,27 @@ unsafe fn report_latency(label: &str, values: *mut u64, len: usize) {
         }
     }
 
+    // Nearest-rank percentile, using integer arithmetic.
+    // numerator / denominator represents the percentile fraction.
+    let percentile = |numerator: usize, denominator: usize| -> u64 {
+        let rank = (len * numerator + denominator - 1) / denominator;
+        unsafe { *values.add(rank.saturating_sub(1)) }
+    };
+
     let mut total = 0u64;
     for i in 0..len {
         total += unsafe { *values.add(i) };
     }
 
     kprintln!(
-        "{}: min={} median={} avg={} max={} TSC ticks",
+        "{}: min={} p50={} p90={} p95={} p99={} p99.9={} avg={} max={} TSC ticks",
         label,
         unsafe { *values },
-        unsafe { *values.add(len / 2) },
+        percentile(50, 100),
+        percentile(90, 100),
+        percentile(95, 100),
+        percentile(99, 100),
+        percentile(999, 1000),
         total / len as u64,
         unsafe { *values.add(len - 1) },
     );

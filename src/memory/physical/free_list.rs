@@ -1,6 +1,5 @@
 use core::hint::unlikely;
 
-use crate::kprintln;
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::utils::prefetch_read_t0;
 
@@ -29,26 +28,26 @@ impl FreeBlock {
     }
 
     #[inline(always)]
-    pub unsafe fn pop(head: *mut *mut FreeBlock) -> Option<*mut FreeBlock> {
+    pub unsafe fn pop(head: *mut *mut FreeBlock) -> *mut FreeBlock {
         unsafe {
-            if unlikely(head.is_null()) {
-                return None;
-            }
+            // if unlikely(head.is_null()) {
+            //     return None;
+            // }
 
             let node = *head;
-            if unlikely(node.is_null()) {
-                return None;
-            }
+            // if unlikely(node.is_null()) {
+            //     return None;
+            // }
 
-            if unlikely((node as usize) % core::mem::align_of::<FreeBlock>() != 0) {
-                kprintln!("CORRUPT FREE LIST: node_ptr={:#x}", node as usize);
-                return None;
-            }
+            // if unlikely((node as usize) % core::mem::align_of::<FreeBlock>() != 0) {
+            //     kprintln!("CORRUPT FREE LIST: node_ptr={:#x}", node as usize);
+            //     return None;
+            // }
 
             *head = (*node).next;
             (*node).next = core::ptr::null_mut();
-
-            return Some(node);
+            // return Some(node);
+            return node;
         }
     }
 
@@ -70,7 +69,9 @@ impl FreeBlock {
             }
 
             if core::ptr::eq(*head, addr) {
-                return Self::pop(head);
+                // return Self::pop(head);
+                let node = Self::pop(head);
+                return Some(node);
             }
 
             let temp = head;

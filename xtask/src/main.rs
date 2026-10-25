@@ -251,7 +251,7 @@ fn qemu(config: &Config, debug: bool, release: bool) -> Result<()> {
         "-smp".to_string(),
         "1".to_string(),
         "-m".to_string(),
-        "8192M".to_string(),
+        "16384M".to_string(),
         "-drive".to_string(),
         format!("if=pflash,format=raw,readonly=on,file={code}"),
         "-drive".to_string(),
