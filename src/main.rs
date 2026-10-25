@@ -7,10 +7,7 @@ use core::panic::PanicInfo;
 use crate::{
     boot::BootInfo,
     drivers::serial::{self},
-    memory::{
-        buddy_test::{test_buddy_allocator_benchmark, test_buddy_allocator_stress},
-        hhdm,
-    },
+    memory::{hhdm, physical::buddy_test::test_buddy_allocator_benchmark},
     x86_64::cpu::{gdt::load_gdt, idt::load_idt},
 };
 

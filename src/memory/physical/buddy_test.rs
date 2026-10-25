@@ -8,8 +8,8 @@ use crate::{
     kprintln,
     memory::{
         address::{PhysAddr, TranslateAddr, VirtAddr},
-        buddy::{BuddyAllocator, PhysicalAllocator},
         map::MemoryMap,
+        physical::{PhysicalAllocator, buddy::BuddyAllocator},
     },
 };
 
