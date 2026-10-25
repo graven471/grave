@@ -3,10 +3,14 @@ use core::{
     hint::{likely, unlikely},
 };
 
-use crate::memory::{
-    address::{PhysAddr, TranslateAddr, VirtAddr},
-    map::MemoryMap,
-    physical::{PhysicalAllocator, free_list::FreeBlock},
+use crate::{
+    kprintln,
+    memory::{
+        address::{PhysAddr, TranslateAddr, VirtAddr},
+        hhdm,
+        map::MemoryMap,
+        physical::{PhysicalAllocator, free_list::FreeBlock},
+    },
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -185,6 +189,7 @@ impl PhysicalAllocator for BuddyAllocator {
                         return Err(BuddyError::CorruptedFreeList);
                     }
                 }
+
                 buddy.bitmap.set_bit(order as u16);
 
                 addr += block_size;
@@ -201,20 +206,26 @@ impl PhysicalAllocator for BuddyAllocator {
 
         if likely(!self.blocks[requested_order].is_null()) {
             let block = unsafe { FreeBlock::pop(&raw mut self.blocks[requested_order]) };
+            debug_assert!(!block.is_null(), "pop block is null");
             let virt = unsafe { VirtAddr::new_unchecked(block as u64) };
-            return virt.translate().ok_or(BuddyError::InvalidAddress);
+            let phys_addr = virt.as_64() - hhdm::offset();
+            debug_assert!(
+                PhysAddr::new(phys_addr).is_some(),
+                "invalid physical address derived from buddy free-list node"
+            );
+            // todo: check address invariant
+            return unsafe { Ok(PhysAddr::new_unchecked(phys_addr)) };
         }
 
-        // check if bitmap is stall since we are not clearing in fast path
-        if self.blocks[requested_order].is_null() {
-            self.bitmap.clear_bit(requested_order as u16);
+        let mut actual_order: usize = usize::MAX;
+        for order in (requested_order)..=MAX_ORDER {
+            if likely(!self.blocks[order].is_null()) {
+                actual_order = order;
+                break;
+            }
         }
-
-        let masked = self.bitmap.value() & (u16::MAX << requested_order);
-        let mut actual_order = masked.trailing_zeros() as usize;
-
-        if unlikely(actual_order > MAX_ORDER) {
-            return Err(BuddyError::OutOfMemory);
+        if unlikely(actual_order == usize::MAX) {
+            return Err(BuddyError::NoUsableMemory);
         }
 
         let mut splits_remaining = actual_order - requested_order;
@@ -236,10 +247,6 @@ impl PhysicalAllocator for BuddyAllocator {
             block = unsafe { FreeBlock::pop(&mut self.blocks[actual_order]) };
             debug_assert!(!block.is_null());
 
-            if self.blocks[actual_order].is_null() {
-                self.bitmap.clear_bit(actual_order as u16);
-            }
-
             let block_addr = block as u64;
             let right_start = block_addr + sh;
 
@@ -248,8 +255,6 @@ impl PhysicalAllocator for BuddyAllocator {
             }) {
                 return Err(BuddyError::CorruptedFreeList);
             }
-
-            self.bitmap.set_bit(lower_order as u16);
 
             actual_order = lower_order;
             size = sh as usize;
@@ -262,60 +267,53 @@ impl PhysicalAllocator for BuddyAllocator {
 
     #[inline(always)]
     fn free(&mut self, ptr: PhysAddr, layout: Layout) -> Result<(), Self::Error> {
-        if unlikely(ptr.as_ptr::<u64>().is_null()) {
-            return Err(BuddyError::InvalidFree);
-        }
+        debug_assert!(!ptr.as_ptr::<u64>().is_null(), "free ptr is null");
 
         let size = self.round_size(layout);
-        let mut curr_block_addr: u64;
         let mut order = self.size_to_order(size);
+        let mut curr_addr = ptr.as_64();
 
         loop {
-            let block_size = self.order_to_size(order) as u64;
-            let buddy_addr_phys = ptr.as_64() ^ block_size;
-            let buddy_addr_virt = ptr.translate().ok_or(BuddyError::InvalidAddress)?;
-
-            let block = unsafe {
-                FreeBlock::remove_by_address(
-                    &mut self.blocks[order],
-                    buddy_addr_virt.as_mut_ptr::<FreeBlock>(),
-                )
-            };
-
-            let Some(_) = block else {
-                unsafe {
-                    FreeBlock::push(
-                        &mut self.blocks[order],
-                        ptr.translate()
-                            .ok_or(BuddyError::InvalidAddress)?
-                            .as_mut_ptr::<FreeBlock>(),
-                    );
-                };
-                // 1 is free and 0 is not free in buddy
-                if self.blocks[order].is_null() {
-                    self.bitmap.set_bit(order as u16);
-                }
-                return Ok(());
-            };
-
-            curr_block_addr = ptr.as_64().min(buddy_addr_phys);
-
             if order == MAX_ORDER {
                 break;
             }
+
+            let block_size = self.order_to_size(order) as u64;
+            let buddy_addr = curr_addr ^ block_size;
+
+            let buddy_virt: VirtAddr = unsafe {
+                PhysAddr::new_unchecked(buddy_addr)
+                    .translate()
+                    .ok_or(BuddyError::InvalidAddress)?
+            };
+
+            let removed = unsafe {
+                FreeBlock::remove_by_address(
+                    &mut self.blocks[order],
+                    buddy_virt.as_mut_ptr::<FreeBlock>(),
+                )
+            };
+
+            if removed.is_null() {
+                break;
+            }
+
+            // Both blocks are now represented by their parent block.
+            curr_addr = curr_addr.min(buddy_addr);
             order += 1;
         }
 
+        let curr_virt = unsafe {
+            PhysAddr::new_unchecked(curr_addr)
+                .translate()
+                .ok_or(BuddyError::InvalidAddress)?
+        };
+
         unsafe {
-            FreeBlock::push(
-                &mut self.blocks[order],
-                PhysAddr::new_unchecked(curr_block_addr)
-                    .translate()
-                    .ok_or(BuddyError::InvalidAddress)?
-                    .as_mut_ptr::<FreeBlock>(),
-            );
+            if !FreeBlock::push(&mut self.blocks[order], curr_virt.as_mut_ptr::<FreeBlock>()) {
+                return Err(BuddyError::CorruptedFreeList);
+            }
         }
-        self.bitmap.set_bit(order as u16);
         return Ok(());
     }
 }

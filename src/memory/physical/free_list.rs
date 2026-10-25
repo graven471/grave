@@ -1,4 +1,4 @@
-use core::hint::unlikely;
+use core::hint::{likely, unlikely};
 
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::utils::prefetch_read_t0;
@@ -28,25 +28,13 @@ impl FreeBlock {
     }
 
     #[inline(always)]
-    pub unsafe fn pop(head: *mut *mut FreeBlock) -> *mut FreeBlock {
+    pub const unsafe fn pop(head: *mut *mut FreeBlock) -> *mut FreeBlock {
+        debug_assert!(!head.is_null(), "head is null");
         unsafe {
-            // if unlikely(head.is_null()) {
-            //     return None;
-            // }
-
             let node = *head;
-            // if unlikely(node.is_null()) {
-            //     return None;
-            // }
-
-            // if unlikely((node as usize) % core::mem::align_of::<FreeBlock>() != 0) {
-            //     kprintln!("CORRUPT FREE LIST: node_ptr={:#x}", node as usize);
-            //     return None;
-            // }
-
+            debug_assert!(!node.is_null(), "node is null");
             *head = (*node).next;
             (*node).next = core::ptr::null_mut();
-            // return Some(node);
             return node;
         }
     }
@@ -55,40 +43,52 @@ impl FreeBlock {
     pub unsafe fn remove_by_address(
         head: *mut *mut FreeBlock,
         addr: *const FreeBlock,
-    ) -> Option<*mut FreeBlock> {
+    ) -> *mut FreeBlock {
+        debug_assert!(
+            !addr.is_null(),
+            "address passed in remove_by_address is null"
+        );
+
         unsafe {
-            if unlikely(head.is_null() || addr.is_null()) {
-                return None;
+            if head.is_null() || (*head).is_null() {
+                return core::ptr::null_mut();
             }
 
             #[cfg(target_arch = "x86_64")]
             prefetch_read_t0((*head).cast());
 
-            if unlikely((*head).is_null()) {
-                return None;
-            }
-
             if core::ptr::eq(*head, addr) {
-                // return Self::pop(head);
                 let node = Self::pop(head);
-                return Some(node);
+                debug_assert!(
+                    !node.is_null(),
+                    "node reuturned by pop is null is remove_by_address"
+                );
+                return node;
             }
 
-            let temp = head;
-
-            // todo: need solid proof to use this
-            // prefetch_read_t0((*temp).cast());
-            // prefetch_read_t0((**temp).next.cast());
-
-            while !(*temp).is_null() {
-                if core::ptr::eq((**temp).next, addr) {
-                    let node_ptr = (**temp).next;
-                    (**temp).next = (*node_ptr).next;
-                    return Some(node_ptr);
+            let mut cur = *head;
+            while likely(!cur.is_null()) {
+                if core::ptr::eq((*cur).next, addr) {
+                    let node_ptr = (*cur).next;
+                    (*cur).next = (*node_ptr).next;
+                    debug_assert!(!node_ptr.is_null(), "node_ptr is null");
+                    return node_ptr;
                 }
-                *temp = (**temp).next;
+                cur = (*cur).next;
             }
-            return None;
+            return core::ptr::null_mut();
+            //
+            //             let temp = head;
+            //             while likely(!(*temp).is_null()) {
+            //                 if core::ptr::eq((**temp).next, addr) {
+            //                     let node_ptr = (**temp).next;
+            //                     (**temp).next = (*node_ptr).next;
+            //                     debug_assert!(!node_ptr.is_null(), "node_ptr is null");
+            //                     return node_ptr;
+            //                 }
+            //                 *temp = (**temp).next;
+            //             }
+            //             return core::ptr::null_mut();
         }
     }
 }
