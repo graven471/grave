@@ -279,6 +279,7 @@ impl PhysicalAllocator for BuddyAllocator {
             }
 
             let block_size = self.order_to_size(order) as u64;
+            // this is so elegant
             let buddy_addr = curr_addr ^ block_size;
 
             let buddy_virt: VirtAddr = unsafe {
