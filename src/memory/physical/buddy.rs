@@ -16,6 +16,52 @@ use crate::x86_64::utils::prefetch_read_t0;
 #[derive(Debug)]
 pub struct AllocationError;
 
+use core::fmt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuddyError {
+    /// No suitable free block exists for the requested allocation.
+    OutOfMemory,
+
+    /// The requested layout has an invalid size or alignment.
+    InvalidLayout,
+
+    /// The requested allocation exceeds the allocator's maximum order.
+    OrderTooLarge,
+
+    /// The supplied physical address is null, unmapped, or invalid.
+    InvalidAddress,
+
+    /// The address does not correspond to a valid allocated block.
+    InvalidFree,
+
+    /// The corresponding buddy block is missing from the free list.
+    CorruptedFreeList,
+
+    /// The memory map contains no usable region large enough to initialize.
+    NoUsableMemory,
+
+    /// Address arithmetic overflowed while calculating a block boundary.
+    AddressOverflow,
+}
+
+impl fmt::Display for BuddyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::OutOfMemory => "buddy allocator: out of memory",
+            Self::InvalidLayout => "buddy allocator: invalid allocation layout",
+            Self::OrderTooLarge => "buddy allocator: allocation exceeds maximum order",
+            Self::InvalidAddress => "buddy allocator: invalid physical address",
+            Self::InvalidFree => "buddy allocator: invalid or double free",
+            Self::CorruptedFreeList => "buddy allocator: free-list invariant violated",
+            Self::NoUsableMemory => "buddy allocator: no usable memory available",
+            Self::AddressOverflow => "buddy allocator: address arithmetic overflow",
+        })
+    }
+}
+
+impl core::error::Error for BuddyError {}
+
 const MIN_SIZE: usize = 4096;
 const MAX_ORDER: usize = 11;
 
@@ -50,15 +96,8 @@ impl BuddyAllocator {
     }
 }
 
-/*
- * core rules of buddy
- * S(k) = 2^k          (block size)
- * B(i, k) = i XOR 2^k (buddy index) where, i = block index, k = order
- * P(i, k) = i & ~2^k  (parent index)
- *
- */
 impl PhysicalAllocator for BuddyAllocator {
-    type Error = AllocationError;
+    type Error = BuddyError;
 
     fn init(memory_map: &MemoryMap) -> Result<Self, Self::Error>
     where
@@ -99,17 +138,17 @@ impl PhysicalAllocator for BuddyAllocator {
 
                 // block_size(o) = MIN_SIZE * 2^o
                 let block_size = buddy.order_to_size(order) as u64;
-                let phys = PhysAddr::new(addr).ok_or(AllocationError)?;
+                let phys = PhysAddr::new(addr).ok_or(BuddyError::InvalidAddress)?;
 
                 let block = phys
                     .translate()
-                    .ok_or(AllocationError)?
+                    .ok_or(BuddyError::InvalidAddress)?
                     .as_mut_ptr::<FreeBlock>();
 
                 unsafe {
                     // buddy.blocks[order] -> [block] -> [block] -> [block] -> null
                     if unlikely(!FreeBlock::push(&mut buddy.blocks[order], block)) {
-                        return Err(AllocationError);
+                        return Err(BuddyError::CorruptedFreeList);
                     }
                 }
 
@@ -134,17 +173,15 @@ impl PhysicalAllocator for BuddyAllocator {
         }
 
         if unlikely(actual_order == usize::MAX) {
-            return Err(AllocationError);
+            return Err(BuddyError::NoUsableMemory);
         }
 
         let mut splits_remaining = actual_order - requested_order;
         if likely(splits_remaining == 0) {
             let block = unsafe { FreeBlock::pop(&raw mut self.blocks[requested_order]) }
-                .ok_or(AllocationError)?;
-
-            let virt = VirtAddr::new(block as u64).ok_or(AllocationError)?;
-            // kprintln!("allocated address = {:#x}", (block as u64) - hhdm::offset());
-            return virt.translate().ok_or(AllocationError);
+                .ok_or(BuddyError::CorruptedFreeList)?;
+            let virt = VirtAddr::new(block as u64).ok_or(BuddyError::InvalidAddress)?;
+            return virt.translate().ok_or(BuddyError::InvalidAddress);
         }
 
         size = self.order_to_size(actual_order);
@@ -166,8 +203,8 @@ impl PhysicalAllocator for BuddyAllocator {
             let sh = (size >> 1) as u64;
             let lower_order = actual_order - 1;
 
-            block =
-                unsafe { FreeBlock::pop(&mut self.blocks[actual_order]) }.ok_or(AllocationError)?;
+            block = unsafe { FreeBlock::pop(&mut self.blocks[actual_order]) }
+                .ok_or(BuddyError::CorruptedFreeList)?;
 
             let block_addr = block as u64;
             let right_start = block_addr + sh;
@@ -177,7 +214,7 @@ impl PhysicalAllocator for BuddyAllocator {
                     &mut self.blocks[lower_order],
                     right_start as *mut FreeBlock,
                 )) {
-                    return Err(AllocationError);
+                    return Err(BuddyError::CorruptedFreeList);
                 }
             }
 
@@ -185,15 +222,14 @@ impl PhysicalAllocator for BuddyAllocator {
             size = sh as usize;
             splits_remaining -= 1;
         }
-        // kprintln!("allocated address = {:#x}", (block as u64) - hhdm::offset());
-        let virt = VirtAddr::new(block as u64).ok_or(AllocationError)?;
-        return virt.translate().ok_or(AllocationError);
+        let virt = VirtAddr::new(block as u64).ok_or(BuddyError::InvalidAddress)?;
+        return virt.translate().ok_or(BuddyError::InvalidAddress);
     }
 
     #[inline(always)]
     fn free(&mut self, ptr: PhysAddr, layout: Layout) -> Result<(), Self::Error> {
         if unlikely(ptr.as_ptr::<u64>().is_null()) {
-            return Err(AllocationError);
+            return Err(BuddyError::InvalidFree);
         }
 
         let size = self.round_size(layout);
@@ -203,7 +239,7 @@ impl PhysicalAllocator for BuddyAllocator {
         loop {
             let block_size = self.order_to_size(order) as u64;
             let buddy_addr_phys = ptr.as_64() ^ block_size;
-            let buddy_addr_virt = ptr.translate().ok_or(AllocationError)?;
+            let buddy_addr_virt = ptr.translate().ok_or(BuddyError::InvalidAddress)?;
 
             let block = unsafe {
                 FreeBlock::remove_by_address(
@@ -217,7 +253,7 @@ impl PhysicalAllocator for BuddyAllocator {
                     FreeBlock::push(
                         &mut self.blocks[order],
                         ptr.translate()
-                            .ok_or(AllocationError)?
+                            .ok_or(BuddyError::InvalidAddress)?
                             .as_mut_ptr::<FreeBlock>(),
                     );
                 };
@@ -237,7 +273,7 @@ impl PhysicalAllocator for BuddyAllocator {
                 &mut self.blocks[order],
                 PhysAddr::new_unchecked(curr_block_addr)
                     .translate()
-                    .ok_or(AllocationError)?
+                    .ok_or(BuddyError::InvalidAddress)?
                     .as_mut_ptr::<FreeBlock>(),
             );
         }
