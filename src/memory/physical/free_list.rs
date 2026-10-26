@@ -1,4 +1,4 @@
-use core::hint::{likely, unlikely};
+use core::hint::likely;
 
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::utils::prefetch_read_t0;
@@ -17,9 +17,10 @@ impl FreeBlock {
 
     #[inline(always)]
     pub const unsafe fn push(head: *mut *mut FreeBlock, other: *mut FreeBlock) -> bool {
-        if unlikely(head.is_null() || other.is_null()) {
-            return false;
-        }
+        debug_assert!(
+            !head.is_null() || !other.is_null(),
+            "cannot push null values"
+        );
         unsafe {
             (*other).next = *head;
             *head = other;

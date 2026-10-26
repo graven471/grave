@@ -1,21 +1,19 @@
 #![feature(abi_x86_interrupt, likely_unlikely)]
 #![no_std]
 #![no_main]
-
+#![allow(unsafe_op_in_unsafe_fn)]
 use core::panic::PanicInfo;
 
 use crate::{
     boot::BootInfo,
     drivers::serial::{self},
-    memory::{
-        hhdm,
-        physical::buddy_test::{test_buddy_allocator_benchmark, test_buddy_allocator_stress},
-    },
+    memory::{hhdm, physical::buddy_test::test_buddy_allocator_benchmark},
     x86_64::cpu::{gdt::load_gdt, idt::load_idt},
 };
 
 pub mod boot;
 pub mod drivers;
+pub mod list;
 pub mod macros;
 pub mod memory;
 pub mod sync;

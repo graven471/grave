@@ -3,14 +3,11 @@ use core::{
     hint::{likely, unlikely},
 };
 
-use crate::{
-    kprintln,
-    memory::{
-        address::{PhysAddr, TranslateAddr, VirtAddr},
-        hhdm,
-        map::MemoryMap,
-        physical::{PhysicalAllocator, free_list::FreeBlock},
-    },
+use crate::memory::{
+    address::{PhysAddr, TranslateAddr, VirtAddr},
+    hhdm,
+    map::MemoryMap,
+    physical::{PhysicalAllocator, free_list::FreeBlock},
 };
 
 #[cfg(target_arch = "x86_64")]

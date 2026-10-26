@@ -57,12 +57,23 @@
 +-------------------------+
 | ...                     |
 +-------------------------+
+
+
+kmem_cache = cache metadata
+slab = one memory pool for that cache
+freelist = list of free objects inside a slab
+
+struct kmem_cache does not hold a direct single next_slab pointer in this header.
+Instead, slabs are kept in lists managed by the allocator.
+each slab has:
+struct kmem_cache *slab_cache
+struct list_head slab_list
 */
 
 use core::alloc::Layout;
 
 use crate::memory::{
-    address::PhysAddr,
+    address::{PhysAddr, VirtAddr},
     physical::{PhysicalAllocator, buddy::BuddyAllocator, free_list::FreeBlock},
 };
 
@@ -72,7 +83,7 @@ pub const fn align_up(value: usize, align: usize) -> usize {
 }
 
 #[repr(u8)]
-enum SlubState {
+enum State {
     Empty,
     Partial,
     Full,
@@ -82,9 +93,10 @@ struct Slub<const N: usize> {
     // one contigious page
     page: PhysAddr,
     // blocks linked together
-    // head -> [] -> [] -> [] -> [] -> null
+    // next -> [] -> [] -> [] -> [] -> null
     next: *mut FreeBlock,
-    state: SlubState,
+    free_count: usize,
+    state: State,
 }
 
 struct KMemCache<const N: usize> {
@@ -104,7 +116,6 @@ impl<const N: usize> KMemCache<N> {
     // todo: remove buddy from arg either make it global or anything
     pub fn new() -> Self {
         let _ = Self::ASSERT_POW2;
-
         Self {
             head: core::ptr::null_mut(),
         }
@@ -115,7 +126,7 @@ impl<const N: usize> KMemCache<N> {
         (PAGE_SIZE - offset) >> N.trailing_zeros()
     }
 
-    pub fn alloc<T>(&mut self, phys_allocator: &mut T) -> Result<(), SlubError>
+    pub fn alloc<T>(&mut self, phys_allocator: &mut T) -> Result<VirtAddr, SlubError>
     where
         T: PhysicalAllocator,
     {
@@ -132,23 +143,31 @@ impl<const N: usize> KMemCache<N> {
         let start = page.as_64() + header_size as u64;
         let start = align_up(start as usize, N) as u64;
         let offset = start - page.as_64();
-        debug_assert!(!offset.is_power_of_two(), "offset is not power of two");
 
         let slots = self.slots(offset as usize);
 
         let mut head: Slub<N> = Slub {
             next: core::ptr::null_mut(),
             page,
-            state: SlubState::Empty,
+            free_count: slots,
+            state: State::Empty,
         };
-
-        unsafe {
-            core::ptr::write(slub, head);
-        }
 
         for i in (0..slots).rev() {
             let slot_addr = start + (i * N) as u64;
+            if unsafe { !FreeBlock::push(&mut head.next, slot_addr as *mut FreeBlock) } {
+                return Err(SlubError);
+            }
         }
+        unsafe {
+            core::ptr::write(page.as_mut_ptr(), head);
+        };
+        self.head = page.as_mut_ptr::<Slub<N>>();
+        // this will update head each this if
+        // head -> Slub_a after that it will head -> Slub_b _a is lost
+        // we want
+        // head -> slub_a -> slub_b -> slub_c -> slub_d
+
         todo!()
     }
 }
