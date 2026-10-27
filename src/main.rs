@@ -7,6 +7,7 @@ use core::panic::PanicInfo;
 use crate::{
     boot::BootInfo,
     drivers::serial::{self},
+    list::run_list_tests,
     memory::{hhdm, physical::buddy_test::test_buddy_allocator_benchmark},
     x86_64::cpu::{gdt::load_gdt, idt::load_idt},
 };
@@ -60,6 +61,11 @@ pub extern "C" fn kernel_main() -> ! {
     kprintln!("before allocator test");
     test_buddy_allocator_benchmark(&boot_info.memory_map);
     kprintln!("buddy allocator test passed");
+
+    if !run_list_tests() {
+        kprintln!("failed to pass linked list tests");
+    }
+    kprintln!("linked list tests passed");
 
     for y in 0..boot_info.framebuffer.height {
         for x in 0..boot_info.framebuffer.width {
