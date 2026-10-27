@@ -2,20 +2,26 @@
 #![no_std]
 #![no_main]
 #![allow(unsafe_op_in_unsafe_fn)]
-use core::panic::PanicInfo;
+use core::{mem::MaybeUninit, panic::PanicInfo};
 
 use crate::{
     boot::BootInfo,
+    collections::intrusive_list::ListHead,
     drivers::serial::{self},
-    list::run_list_tests,
-    memory::{hhdm, physical::buddy_test::test_buddy_allocator_benchmark},
+    memory::{
+        hhdm,
+        physical::{PhysicalAllocator, buddy::BuddyAllocator},
+        slab::KMemCache,
+    },
     x86_64::cpu::{gdt::load_gdt, idt::load_idt},
 };
 
-pub mod boot;
-pub mod drivers;
-pub mod list;
+#[macro_use]
 pub mod macros;
+
+pub mod boot;
+pub mod collections;
+pub mod drivers;
 pub mod memory;
 pub mod sync;
 pub mod x86_64;
@@ -36,6 +42,8 @@ pub extern "C" fn _start() -> ! {
         kernel_main = sym kernel_main,
     );
 }
+
+static mut CACHE: MaybeUninit<KMemCache<32>> = MaybeUninit::uninit();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() -> ! {
@@ -58,14 +66,32 @@ pub extern "C" fn kernel_main() -> ! {
         hhdm::init(boot_info.hhdm_offset);
     }
 
-    kprintln!("before allocator test");
-    test_buddy_allocator_benchmark(&boot_info.memory_map);
-    kprintln!("buddy allocator test passed");
+    let mut frame_allocator =
+        BuddyAllocator::init(&boot_info.memory_map).expect("failed to init buddy allocator");
+    kprintln!("buddy allocator init successfully");
 
-    if !run_list_tests() {
-        kprintln!("failed to pass linked list tests");
+    // probably the worst code i have ever written ewwww
+    unsafe {
+        #![allow(static_mut_refs)]
+        CACHE.write(KMemCache::new());
+        let cache = CACHE.assume_init_mut();
+        ListHead::init(&mut cache.list as *mut _);
+
+        let ptr = cache
+            .alloc(&mut frame_allocator)
+            .expect("slab failed to allocate");
+        let p = ptr.as_mut_ptr::<u32>();
+        *p = 0x1234;
+        kprintln!("p is {:#x}", *p);
+
+        let ptr = cache
+            .alloc(&mut frame_allocator)
+            .expect("slab failed to allocate");
+
+        let p = ptr.as_mut_ptr::<u32>();
+        *p = 0x15678;
+        kprintln!("p is {:#x}", *p);
     }
-    kprintln!("linked list tests passed");
 
     for y in 0..boot_info.framebuffer.height {
         for x in 0..boot_info.framebuffer.width {

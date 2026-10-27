@@ -3,6 +3,7 @@ use core::hint::likely;
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::utils::prefetch_read_t0;
 
+// (todo): rename it to FreeListNode
 pub struct FreeBlock {
     pub next: *mut FreeBlock,
 }
@@ -78,18 +79,6 @@ impl FreeBlock {
                 cur = (*cur).next;
             }
             return core::ptr::null_mut();
-            //
-            //             let temp = head;
-            //             while likely(!(*temp).is_null()) {
-            //                 if core::ptr::eq((**temp).next, addr) {
-            //                     let node_ptr = (**temp).next;
-            //                     (**temp).next = (*node_ptr).next;
-            //                     debug_assert!(!node_ptr.is_null(), "node_ptr is null");
-            //                     return node_ptr;
-            //                 }
-            //                 *temp = (**temp).next;
-            //             }
-            //             return core::ptr::null_mut();
         }
     }
 }
