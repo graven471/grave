@@ -148,7 +148,9 @@ const PAGE_SIZE: usize = 4096;
 
 impl<const N: usize> KMemCache<N> {
     const ASSERT_POW2: () = assert!(N.is_power_of_two(), "N must needs to be power of two");
-    // const SLOTS: u64 = (PAGE_SIZE >> N.ilog2()) as u64;
+    const HEADER: usize = align_up(size_of::<Slab<N>>(), N);
+    const SLOTS: usize = (PAGE_SIZE - Self::HEADER) >> N.trailing_zeros();
+
     pub fn new() -> Self {
         let _ = Self::ASSERT_POW2;
         let mut cache = Self {
@@ -185,19 +187,16 @@ impl<const N: usize> KMemCache<N> {
         let virt = page.translate().ok_or(SlabError)?;
 
         // skip Slab metadata and align up with respect to N
-        let header_size = size_of::<Slab<N>>();
-        let start = virt.as_64() + header_size as u64;
-        let start = align_up(start as usize, N) as u64;
-        let offset = start - virt.as_64();
-        let slots = self.slots(offset as usize);
+        // let header_size = size_of::<Slab<N>>();
+        // let start = virt.as_64() + header_size as u64;
+        // let start = align_up(start as usize, N) as u64;
+        // let offset = start - virt.as_64();
+        // let slots = self.slots(offset as usize);
 
-        kprintln!(
-            "slots = {}, header_size = {}, start = {:#x}, offset = {}",
-            slots,
-            header_size,
-            start,
-            offset
-        );
+        let start = virt.as_64() + Self::HEADER as u64;
+        let slots = Self::SLOTS;
+
+        kprintln!("slots = {}, start = {:#x}", slots, start,);
 
         let slab: Slab<N> = Slab {
             free_count: slots,
@@ -216,6 +215,7 @@ impl<const N: usize> KMemCache<N> {
         ListHead::init(&mut (*slab_ptr).slab_list as *mut _);
 
         for i in (0..slots).rev() {
+            // Pi = P + iQ, where P is the base and Q is the block size
             let slot_addr = start + (i * N) as u64;
             if !FreeBlock::push(&mut (*slab_ptr).next, slot_addr as *mut FreeBlock) {
                 return Err(SlabError);
